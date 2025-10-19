@@ -46,18 +46,26 @@
             })
             mkGoEnv
             buildGoApplication
+            hooks
             ;
           gomod2nix = callPackage ./default.nix {
-            inherit mkGoEnv buildGoApplication;
+            inherit
+              buildGoApplication
+              mkGoEnv
+              hooks
+              ;
           };
         in
         {
           packages.default = gomod2nix;
           legacyPackages = {
             # we cannot put them in packages because they are builder functions
-            inherit mkGoEnv buildGoApplication;
-            # just have this here for convenience
-            inherit gomod2nix;
+            inherit
+              mkGoEnv
+              buildGoApplication
+              gomod2nix
+              hooks
+              ;
           };
           devShells.default = callPackage ./shell.nix {
             inherit mkGoEnv gomod2nix;

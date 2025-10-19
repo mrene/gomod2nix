@@ -6,6 +6,7 @@
   installShellFiles,
   buildGoApplication,
   mkGoEnv,
+  hooks,
 }:
 
 buildGoApplication {
@@ -37,7 +38,11 @@ buildGoApplication {
   ];
 
   passthru = {
-    inherit buildGoApplication mkGoEnv;
+    inherit
+      buildGoApplication
+      mkGoEnv
+      hooks
+      ;
   };
 
   postInstall =
