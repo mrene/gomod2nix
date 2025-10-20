@@ -17,4 +17,6 @@ goCheckHook() {
     echo "Finished goCheckHook"
 }
 
-checkPhase=goCheckHook
+if [ -z "${checkPhase-}" ]; then
+    checkPhase=goCheckHook
+fi

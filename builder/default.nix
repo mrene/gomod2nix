@@ -4,6 +4,7 @@
   cacert,
   fetchgit,
   git,
+  gnutar,
   gomod2nix,
   jq,
   lib,
@@ -15,6 +16,7 @@
   stdenv,
   stdenvNoCC,
   writeScript,
+  zstd,
 }:
 let
 
@@ -24,6 +26,8 @@ let
       makeSetupHook
       rsync
       stdenv
+      gnutar
+      zstd
       ;
   };
 
@@ -79,6 +83,9 @@ let
 
       # Install development dependencies from tools.go
       install = mkInternalPkg "symlink" ./install/install.go;
+
+      # Generate dummy import file for cache warming
+      cachegen = mkInternalPkg "cachegen" ./cachegen/cachegen.go;
     };
 
   fetchGoModule =
@@ -162,6 +169,112 @@ let
         mv vendor $out
       '');
 
+  mkGoCacheEnv =
+    {
+      go,
+      modulesStruct,
+      goMod,
+      vendorEnv,
+      depFilesPath,
+      # Build environment parameters (should match buildGoApplication)
+      nativeBuildInputs ? [ ],
+      buildInputs ? [ ],
+      CGO_ENABLED ? go.CGO_ENABLED,
+      tags ? [ ],
+      ldflags ? [ ],
+      allowGoReference ? false,
+    }:
+    let
+      # Check if cachePackages is defined in modulesStruct
+      cachePackages = modulesStruct.cachePackages or [ ];
+      hasCachePackages = cachePackages != [ ];
+    in
+    stdenv.mkDerivation {
+      name = "go-cache-env";
+
+      dontUnpack = true;
+
+      nativeBuildInputs = [
+        rsync
+        go
+        goConfigHook
+        gnutar
+        zstd
+        # goConfigHook
+      ]
+      ++ nativeBuildInputs;
+
+      inherit buildInputs;
+
+      inherit (go) GOOS GOARCH;
+      inherit CGO_ENABLED;
+
+      # Pass allowGoReference to hook for GOFLAGS configuration
+      allowGoReference = if allowGoReference then "1" else "";
+
+      # Pass tags and ldflags (used by hooks)
+      tags = lib.concatStringsSep "," tags;
+      ldflags = lib.concatStringsSep " " ldflags;
+
+      goVendorDir = vendorEnv;
+
+      # Change the working directory in prePatch so GoConfigHook sets up
+      # vendor/ at the right location
+      prePatch = ''
+        # Create a working directory (Go ignores go.mod in /build)
+        mkdir -p source
+        cd source
+
+        # Copy go.mod and go.sum from filtered source
+        cp ${depFilesPath}/go.mod ./go.mod
+        cp ${depFilesPath}/go.sum ./go.sum 2>/dev/null || touch go.sum
+      '';
+
+      configurePhase = ''
+        # Set up GOCACHE directory (will compress to $out later)
+        mkdir -p "$GOCACHE"
+      '';
+
+      buildPhase = ''
+        runHook preBuild
+
+        ${
+          if hasCachePackages then
+            ''
+              echo "Building ${toString (builtins.length cachePackages)} packages to populate cache..."
+
+              # Generate cache.go that imports all packages
+              printf '%s\n' ${lib.escapeShellArgs cachePackages} | ${internal.cachegen} > cache.go
+
+              cat cache.go
+
+              # Build cache.go - Go will build all dependencies using its scheduler
+              go build -v -mod=vendor cache.go || true
+
+              echo "Cache population complete"
+            ''
+          else
+            ''
+              echo "No cache packages defined, skipping cache population"
+            ''
+        }
+
+        runHook postBuild
+      '';
+
+      installPhase = ''
+        runHook preInstall
+
+        echo "Compressing Go build cache..."
+        mkdir -p "$out"
+        tar -cf - -C "$GOCACHE" . | zstd -T$NIX_BUILD_CORES -o "$out/cache.tar.zst"
+
+        echo "Cache compressed to $out/cache.tar.zst"
+
+        runHook postInstall
+      '';
+    };
+
   # Return a Go attribute and error out if the Go version is older than was specified in go.mod.
   selectGo =
     attrs: goMod:
@@ -220,6 +333,7 @@ let
       pwd,
       toolsGo ? pwd + "/tools.go",
       modules ? pwd + "/gomod2nix.toml",
+      allowGoReference ? false,
       ...
     }@attrs:
     let
@@ -239,7 +353,10 @@ let
 
     in
     stdenv.mkDerivation (
-      removeAttrs attrs [ "pwd" ]
+      removeAttrs attrs [
+        "pwd"
+        "allowGoReference"
+      ]
       // {
         name = "${baseNameOf goMod.module}-env";
 
@@ -249,17 +366,15 @@ let
 
         CGO_ENABLED = attrs.CGO_ENABLED or go.CGO_ENABLED;
 
+        # Pass allowGoReference to hook for GOFLAGS configuration
+        allowGoReference = if allowGoReference then "1" else "";
+
         nativeBuildInputs = [
           rsync
           goConfigHook
         ];
 
         propagatedBuildInputs = [ go ];
-
-        GO_NO_VENDOR_CHECKS = "1";
-
-        GO111MODULE = "on";
-        GOFLAGS = "-mod=vendor";
 
         # Pass vendor directory to the setup hook
         goVendorDir = vendorEnv;
@@ -269,10 +384,7 @@ let
         buildPhase = ''
           mkdir $out
 
-          export GOCACHE=$TMPDIR/go-cache
           export GOPATH="$out"
-          export GOSUMDB=off
-          export GOPROXY=off
 
         ''
         + optionalString (pathExists toolsGo) ''
@@ -300,6 +412,7 @@ let
       passthru ? { },
       tags ? [ ],
       ldflags ? [ ],
+      disableGoCache ? false,
 
       ...
     }@attrs:
@@ -328,6 +441,49 @@ let
         else
           null;
 
+      # Filter source to only dependency files for cache derivation
+      # Use fetched source when building from goPackagePath
+      depFilesSrc =
+        if defaultPackage != "" then
+          vendorEnv.passthru.sources.${defaultPackage}
+        else if pwd != null then
+          pwd
+        else
+          src;
+
+      depFilesPath =
+        if (!disableGoCache && modulesStruct != { } && depFilesSrc != null) then
+          lib.cleanSourceWith {
+            src = depFilesSrc;
+            filter =
+              path: type:
+              let
+                baseName = baseNameOf path;
+              in
+              baseName == "go.mod" || baseName == "go.sum" || baseName == "gomod2nix.toml";
+            name = "go-dep-files";
+          }
+        else
+          null;
+
+      cacheEnv =
+        if (!disableGoCache && modulesStruct != { } && depFilesPath != null) then
+          mkGoCacheEnv {
+            inherit
+              go
+              modulesStruct
+              vendorEnv
+              depFilesPath
+              tags
+              ldflags
+              allowGoReference
+              ;
+            CGO_ENABLED = attrs.CGO_ENABLED or go.CGO_ENABLED;
+            goMod = if goMod != null then goMod else { replace = { }; };
+          }
+        else
+          null;
+
       pname = attrs.pname or baseNameOf defaultPackage;
 
     in
@@ -343,7 +499,6 @@ let
       // attrs
       // {
         nativeBuildInputs = [
-          rsync
           go
           goConfigHook
           goBuildHook
@@ -354,13 +509,13 @@ let
 
         inherit (go) GOOS GOARCH;
 
-        GO_NO_VENDOR_CHECKS = "1";
         CGO_ENABLED = attrs.CGO_ENABLED or go.CGO_ENABLED;
 
-        GO111MODULE = "on";
-        GOFLAGS = [ "-mod=vendor" ] ++ lib.optionals (!allowGoReference) [ "-trimpath" ];
+        # Pass allowGoReference to hook for GOFLAGS configuration
+        allowGoReference = if allowGoReference then "1" else "";
 
         goVendorDir = if vendorEnv != null then vendorEnv else "";
+        goCacheDir = if cacheEnv != null then cacheEnv else "";
         tags = lib.concatStringsSep "," tags;
         ldflags = lib.concatStringsSep " " ldflags;
         modRoot = attrs.modRoot or "";
@@ -373,6 +528,7 @@ let
 
         passthru = {
           inherit go vendorEnv hooks;
+          goCacheEnv = cacheEnv;
         }
         // optionalAttrs (hasAttr "goPackagePath" modulesStruct) {
 
@@ -406,6 +562,7 @@ in
     buildGoApplication
     mkGoEnv
     mkVendorEnv
+    mkGoCacheEnv
     hooks
     ;
 }

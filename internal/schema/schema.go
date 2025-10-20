@@ -26,14 +26,18 @@ type Output struct {
 
 	// Packages with passed import paths has a "default package" which pname & version is inherit from
 	GoPackagePath string `toml:"goPackagePath,omitempty"`
+
+	// List of packages to pre-compile in build cache for faster builds
+	CachePackages []string `toml:"cachePackages,omitempty"`
 }
 
-func Marshal(pkgs []*Package, goPackagePath string, subPackages []string) ([]byte, error) {
+func Marshal(pkgs []*Package, goPackagePath string, subPackages []string, cachePackages []string) ([]byte, error) {
 	out := &Output{
 		SchemaVersion: SchemaVersion,
 		Mod:           make(map[string]*Package),
 		SubPackages:   subPackages,
 		GoPackagePath: goPackagePath,
+		CachePackages: cachePackages,
 	}
 
 	for _, pkg := range pkgs {

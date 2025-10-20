@@ -51,13 +51,32 @@ goConfigHook() {
     export GOPATH="$TMPDIR/go"
     export GOSUMDB=off
     export GOPROXY=off
+    export GO_NO_VENDOR_CHECKS=1
+    export GO111MODULE=on
+
+    export GOFLAGS="${GOFLAGS:+$GOFLAGS } -mod=vendor"
+    if [ "${allowGoReference:-}" != "1" ]; then
+        export GOFLAGS="$GOFLAGS -trimpath"
+    fi
+
     cd "${modRoot:-.}"
 
     # Set up vendor directory if goVendorDir is provided
     if [ -n "${goVendorDir-}" ]; then
         if [ -n "${goVendorDir}" ]; then
+            echo "Setting up vendor directory from ${goVendorDir}"
             rm -rf vendor
             @rsync@/bin/rsync -a -K --ignore-errors "${goVendorDir}"/ vendor
+        fi
+    fi
+
+    # Set up cache directory if goCacheDir is provided
+    if [ -n "${goCacheDir-}" ]; then
+        if [ -n "${goCacheDir}" ] && [ -f "${goCacheDir}/cache.tar.zst" ]; then
+            echo "Restoring Go build cache from ${goCacheDir}/cache.tar.zst"
+            mkdir -p "$GOCACHE"
+            @zstd@/bin/zstd -d -c "${goCacheDir}/cache.tar.zst" | @gnutar@/bin/tar -xf - -C "$GOCACHE"
+            chmod -R +w "$GOCACHE"
         fi
     fi
 

@@ -14,4 +14,6 @@ goInstallHook() {
     echo "Finished goInstallHook"
 }
 
-installPhase=goInstallHook
+if [ -z "${installPhase-}" ]; then
+    installPhase=goInstallHook
+fi

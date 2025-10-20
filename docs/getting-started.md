@@ -77,6 +77,13 @@ After you have entered your development shell you can generate a `gomod2nix.toml
 $ gomod2nix generate
 ```
 
+To optimize build performance by pre-compiling dependencies in the build cache, use:
+``` bash
+$ gomod2nix generate --with-deps
+```
+
+This generates a list of imported packages that will be pre-compiled during the build, significantly reducing subsequent build times. This is particularly useful for projects with many dependencies.
+
 To speed up development and avoid downloading dependencies again in the Nix store you can import them directly from the Go cache using:
 ``` bash
 $ gomod2nix import

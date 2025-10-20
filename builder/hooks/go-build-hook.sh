@@ -42,4 +42,6 @@ goBuildHook() {
     echo "Finished goBuildHook"
 }
 
-buildPhase=goBuildHook
+if [ -z "${buildPhase-}" ]; then
+    buildPhase=goBuildHook
+fi

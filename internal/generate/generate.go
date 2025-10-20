@@ -216,3 +216,87 @@ func GeneratePkgs(directory string, goMod2NixPath string, numWorkers int) ([]*sc
 
 	return packages, nil
 }
+
+// GenerateCacheDeps generates a list of all imported packages
+// (excluding standard library and the current module's packages) for cache optimization.
+func GenerateCacheDeps(directory string) ([]string, error) {
+	goModPath := filepath.Join(directory, "go.mod")
+
+	log.Info("Parsing go.mod to get current module path")
+
+	// Read and parse go.mod to get current module path
+	data, err := os.ReadFile(goModPath)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read go.mod: %w", err)
+	}
+
+	mod, err := modfile.Parse(goModPath, data, nil)
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse go.mod: %w", err)
+	}
+
+	currentModule := mod.Module.Mod.Path
+
+	log.WithFields(log.Fields{
+		"currentModule": currentModule,
+	}).Debug("Generating cache dependencies")
+
+	// Run go list to get all imported packages
+	cmd := exec.Command("go", "list", "-mod=readonly", "-f", "{{.ImportPath}}", "all")
+	cmd.Dir = directory
+	stdout, err := cmd.Output()
+	if err != nil {
+		if exiterr, ok := err.(*exec.ExitError); ok {
+			return nil, fmt.Errorf("failed to run 'go list': %s\n%s", exiterr, exiterr.Stderr)
+		}
+		return nil, fmt.Errorf("failed to run 'go list': %w", err)
+	}
+
+	// Parse and filter packages
+	lines := strings.Split(string(stdout), "\n")
+	var filteredPackages []string
+	seen := make(map[string]bool)
+
+	for _, line := range lines {
+		pkg := strings.TrimSpace(line)
+		if pkg == "" {
+			continue
+		}
+
+		// Skip standard library
+		if pkg == "std" {
+			continue
+		}
+
+		// Skip current module packages
+		if pkg == currentModule || strings.HasPrefix(pkg, currentModule+"/") {
+			continue
+		}
+
+		// Skip vendor packages
+		if strings.HasPrefix(pkg, "vendor/") {
+			continue
+		}
+
+		// Skip internal packages (cannot be imported from outside)
+		if strings.Contains(pkg, "/internal") {
+			continue
+		}
+
+		// Keep only external packages (contain '.')
+		if !strings.Contains(pkg, ".") {
+			continue
+		}
+
+		// Deduplicate
+		if !seen[pkg] {
+			seen[pkg] = true
+			filteredPackages = append(filteredPackages, pkg)
+		}
+	}
+
+	// Sort for determinism
+	sort.Strings(filteredPackages)
+
+	return filteredPackages, nil
+}

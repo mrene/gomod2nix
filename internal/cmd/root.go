@@ -18,6 +18,7 @@ var (
 	flagDirectory string
 	flagOutDir    string
 	maxJobs       int
+	flagWithDeps  bool
 )
 
 func generateFunc(cmd *cobra.Command, args []string) {
@@ -76,7 +77,15 @@ func generateFunc(cmd *cobra.Command, args []string) {
 			goPackagePath = tmpProj.GoPackagePath
 		}
 
-		output, err := schema.Marshal(pkgs, goPackagePath, subPackages)
+		var cachePackages []string
+		if flagWithDeps {
+			cachePackages, err = generate.GenerateCacheDeps(directory)
+			if err != nil {
+				panic(fmt.Errorf("error generating cache packages: %v", err))
+			}
+		}
+
+		output, err := schema.Marshal(pkgs, goPackagePath, subPackages, cachePackages)
 		if err != nil {
 			panic(fmt.Errorf("error marshaling output: %v", err))
 		}
@@ -116,6 +125,7 @@ func init() {
 	rootCmd.PersistentFlags().StringVar(&flagDirectory, "dir", "./", "Go project directory")
 	rootCmd.PersistentFlags().StringVar(&flagOutDir, "outdir", "", "Output directory (defaults to project directory)")
 	rootCmd.PersistentFlags().IntVar(&maxJobs, "jobs", 10, "Max number of concurrent jobs")
+	rootCmd.PersistentFlags().BoolVar(&flagWithDeps, "with-deps", false, "Include dependencies in gomod2nix.toml for build cache priming")
 
 	rootCmd.AddCommand(generateCmd)
 	rootCmd.AddCommand(importCmd)
